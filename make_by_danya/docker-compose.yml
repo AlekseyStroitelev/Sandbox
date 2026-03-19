@@ -2,69 +2,84 @@ version: '3'
 
 services:
   zookeeper:
-    image: docker-proxy.artifactory.tcsbank.ru/apache/kafka:3.9.2
+    image: confluentinc/cp-zookeeper:7.8.6
     container_name: zookeeper
     environment:
-      KAFKA_CFG_DATA_DIR: /var/lib/zookeeper/data
-      KAFKA_CFG_DATA_LOG_DIR: /var/lib/zookeeper/log
-      KAFKA_CFG_TICK_TIME: "2000"
-      KAFKA_CFG_INIT_LIMIT: "5"
-      KAFKA_CFG_SYNC_LIMIT: "2"
-      KAFKA_CFG_CLIENT_PORT: "2181"
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
     ports:
       - "2181:2181"
     networks:
       - kafka_network
+    healthcheck:
+      test: echo stat | nc localhost 2181 || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   kafka:
-    image: docker-proxy.artifactory.tcsbank.ru/apache/kafka:3.9.2
+    image: confluentinc/cp-kafka:7.8.6
     container_name: kafka
     depends_on:
-      - zookeeper
+      zookeeper:
+        condition: service_healthy
     environment:
-      KAFKA_CFG_PROCESS_ROLES: broker,controller
-      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:19091
-      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
-      KAFKA_CFG_CONTROLLER_QUORUM: 1@zookeeper:19091
-      KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
-      KAFKA_CFG_LOG_DIR: /var/lib/kafka/data
-      KAFKA_CFG_LOG_FLUSH_INTERVAL_MS: 1000
-      KAFKA_CFG_LOG_RETENTION_HOURS: 168
-      KAFKA_CFG_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      
+      # Настройка слушателей
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_INTERNAL://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,PLAINTEXT_INTERNAL://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
+      
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      
+      KAFKA_ZOOKEEPER_CONNECTION_TIMEOUT_MS: 60000
     ports:
       - "9092:9092"
     networks:
       - kafka_network
+    healthcheck:
+      test: nc -z localhost 9092 || exit 1
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
 
   schema-registry:
-    image: docker-proxy.artifactory.tcsbank.ru/confluentinc/cp-schema-registry:7.8.6
+    image: confluentinc/cp-schema-registry:7.8.6
     container_name: schema-registry
     depends_on:
-      - kafka
+      kafka:
+        condition: service_healthy
     environment:
-      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:9092
       SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      # Просто адрес, без указания протокола
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:29092
       SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
     ports:
       - "8081:8081"
     networks:
       - kafka_network
+    restart: on-failure:5
 
   akhq:
-    image: docker-proxy.artifactory.tcsbank.ru/tchiotludo/akhq:0.26.0
+    image: tchiotludo/akhq:0.26.0
     container_name: akhq
     depends_on:
-      - kafka
-      - zookeeper
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_started
     environment:
       AKHQ_CONFIGURATION: |
         akhq:
           connections:
             my-kafka:
               properties:
-                bootstrap.servers: "kafka:9092"
+                bootstrap.servers: "kafka:29092"
               schema-registry:
                 url: "http://schema-registry:8081"
     ports:
