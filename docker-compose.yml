@@ -1,6 +1,6 @@
 services:
   kafka:
-    image: confluentinc/cp-kafka:7.8.6
+    image: docker-proxy.artifactory.tcsbank.ru/confluentinc/cp-kafka:7.8.6
     container_name: kafka
     hostname: kafka
     ports:
@@ -41,7 +41,7 @@ services:
       - kafka-network
 
   schema-registry:
-    image: confluentinc/cp-schema-registry:7.8.6
+    image: docker-proxy.artifactory.tcsbank.ru/confluentinc/cp-schema-registry:7.8.6
     container_name: schema-registry
     depends_on:
       kafka:
@@ -63,7 +63,7 @@ services:
       - kafka-network
 
   akhq:
-    image: tchiotludo/akhq:0.26.0
+    image: docker-proxy.artifactory.tcsbank.ru/tchiotludo/akhq:0.26.0
     container_name: akhq
     depends_on:
       kafka:
