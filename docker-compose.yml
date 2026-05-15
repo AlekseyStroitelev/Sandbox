@@ -1,5 +1,5 @@
 services:
-  # Сервис для генерации SSL сертификатов
+  # Генерация SSL сертификатов с добавлением SAN для каждого брокера
   cert-generator:
     image: docker-proxy.artifactory.tcsbank.ru/apache/kafka:3.9.2
     container_name: cert-generator
@@ -8,33 +8,37 @@ services:
     command: |
       bash -c '
       mkdir -p /tmp/certs
-      
-      # Проверяем, есть ли уже сертификаты
       if [ -f /tmp/certs/kafka.truststore.jks ]; then
         echo "Certificates already exist, skipping generation"
         exit 0
       fi
-      
-      # Создаем CA ключ и сертификат
+
+      # CA
       openssl req -x509 -newkey rsa:4096 -keyout /tmp/certs/ca-key -out /tmp/certs/ca-cert -days 365 -nodes -subj "/CN=Kafka-CA"
-      
-      # Создаем keystore для каждого брокера
+
+      # Сертификаты брокеров с SAN = DNS:имя-брокера, DNS:localhost
       for broker in kafka-1 kafka-2 kafka-3; do
-        keytool -keystore /tmp/certs/$${broker}.keystore.jks -alias localhost -validity 365 -genkey -keyalg RSA -dname "CN=$${broker}" -storepass changeit -keypass changeit
-        keytool -keystore /tmp/certs/$${broker}.keystore.jks -alias localhost -validity 365 -certreq -keyalg RSA -file /tmp/certs/$${broker}.csr -storepass changeit -keypass changeit
-        openssl x509 -req -CA /tmp/certs/ca-cert -CAkey /tmp/certs/ca-key -in /tmp/certs/$${broker}.csr -out /tmp/certs/$${broker}-signed.crt -days 365 -CAcreateserial -passin pass:changeit
-        keytool -keystore /tmp/certs/$${broker}.keystore.jks -alias CARoot -importcert -file /tmp/certs/ca-cert -storepass changeit -keypass changeit -noprompt
-        keytool -keystore /tmp/certs/$${broker}.keystore.jks -alias localhost -importcert -file /tmp/certs/$${broker}-signed.crt -storepass changeit -keypass changeit -noprompt
+        keytool -keystore /tmp/certs/$${broker}.keystore.jks -alias localhost -validity 365 -genkey -keyalg RSA \
+          -dname "CN=$${broker}" -ext "SAN=DNS:$${broker},DNS:localhost" -storepass changeit -keypass changeit
+        keytool -keystore /tmp/certs/$${broker}.keystore.jks -alias localhost -validity 365 -certreq -keyalg RSA \
+          -file /tmp/certs/$${broker}.csr -storepass changeit -keypass changeit
+        openssl x509 -req -CA /tmp/certs/ca-cert -CAkey /tmp/certs/ca-key -in /tmp/certs/$${broker}.csr \
+          -out /tmp/certs/$${broker}-signed.crt -days 365 -CAcreateserial -passin pass:changeit
+        keytool -keystore /tmp/certs/$${broker}.keystore.jks -alias CARoot -importcert -file /tmp/certs/ca-cert \
+          -storepass changeit -keypass changeit -noprompt
+        keytool -keystore /tmp/certs/$${broker}.keystore.jks -alias localhost -importcert -file /tmp/certs/$${broker}-signed.crt \
+          -storepass changeit -keypass changeit -noprompt
       done
-      
-      keytool -keystore /tmp/certs/kafka.truststore.jks -alias CARoot -importcert -file /tmp/certs/ca-cert -storepass changeit -keypass changeit -noprompt
-      
+
+      keytool -keystore /tmp/certs/kafka.truststore.jks -alias CARoot -importcert -file /tmp/certs/ca-cert \
+        -storepass changeit -keypass changeit -noprompt
+
       echo "Certificates generated successfully"
       '
     networks:
       - kafka-network
 
-  # Сервис для настройки ACL (запускается после kafka-1)
+  # Инициализация SCRAM пользователей и ACL (без ANONYMOUS)
   acl-setup:
     image: docker-proxy.artifactory.tcsbank.ru/apache/kafka:3.9.2
     container_name: acl-setup
@@ -47,87 +51,75 @@ services:
       bash -c '
       echo "Waiting for Kafka to be ready..."
       sleep 30
-      
-      # Шаг 1: Создаем SCRAM пользователей через PLAINTEXT порт (9094) без аутентификации
+
+      # Создание SCRAM пользователей через PLAINTEXT (только на время инициализации)
       echo "Creating SCRAM users via PLAINTEXT..."
-      
-      # Admin пользователь
-      /opt/kafka/bin/kafka-configs.sh --bootstrap-server kafka-1:9094 --alter --add-config "SCRAM-SHA-512=[password=admin-secret]" --entity-type users --entity-name admin
-      echo "Created user: admin"
-      
-      # Producer пользователь
-      /opt/kafka/bin/kafka-configs.sh --bootstrap-server kafka-1:9094 --alter --add-config "SCRAM-SHA-512=[password=producer-secret]" --entity-type users --entity-name producer
-      echo "Created user: producer"
-      
-      # Consumer пользователь
-      /opt/kafka/bin/kafka-configs.sh --bootstrap-server kafka-1:9094 --alter --add-config "SCRAM-SHA-512=[password=consumer-secret]" --entity-type users --entity-name consumer
-      echo "Created user: consumer"
-      
-      # Schema пользователь
-      /opt/kafka/bin/kafka-configs.sh --bootstrap-server kafka-1:9094 --alter --add-config "SCRAM-SHA-512=[password=schema-secret]" --entity-type users --entity-name schema
-      echo "Created user: schema"
-      
-      echo "SCRAM users created successfully"
-      
-      # Даем время на репликацию пользователей между брокерами
+      for user in admin producer consumer schema akhq interbroker; do
+        pass_var="$${user}-secret"
+        /opt/kafka/bin/kafka-configs.sh --bootstrap-server kafka-1:9094 --alter \
+          --add-config "SCRAM-SHA-512=[password=$${!pass_var}]" --entity-type users --entity-name $${user}
+        echo "Created user: $${user}"
+      done
+
       sleep 5
-      
-      # Шаг 2: Настраиваем ACL используя SASL_PLAINTEXT с аутентификацией admin
-      echo "Setting up ACLs using SASL authentication..."
-      
-      # Admin - все операции на всех топиках
-      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf --add --allow-principal "User:admin" --operation All --topic "*"
-      echo "Added topic ACLs for admin"
-      
-      # Admin - все операции на всех группах потребителей
-      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf --add --allow-principal "User:admin" --operation All --group "*"
-      echo "Added group ACLs for admin"
-      
-      # Admin - все операции на кластере (включая межброкерские операции)
-      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf --add --allow-principal "User:admin" --operation All --cluster "kafka-cluster"
-      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf --add --allow-principal "User:ANONYMOUS" --operation All --cluster "kafka-cluster"
-      echo "Added cluster ACLs for admin"
-      
-      # Producer - запись в топик test
-      echo "Setting up ACLs for producer..."
-      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf --add --allow-principal "User:producer" --operation Write --topic "test"
-      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf --add --allow-principal "User:producer" --operation Describe --topic "test"
-      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf --add --allow-principal "User:producer" --operation Create --topic "test"
-      echo "Producer ACLs configured"
-      
-      # Consumer - чтение из топика test
-      echo "Setting up ACLs for consumer..."
-      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf --add --allow-principal "User:consumer" --operation Read --topic "test"
-      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf --add --allow-principal "User:consumer" --operation Describe --topic "test"
-      
-      # Consumer - права на группы с префиксом group- (wildcard pattern)
-      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf --add --allow-principal "User:consumer" --operation Read --group "group-*"
-      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf --add --allow-principal "User:consumer" --operation Describe --group "group-*"
-      echo "Consumer ACLs configured"
-      
-      # Schema Registry - права на топик _schemas (через ANONYMOUS т.к. подключение без аутентификации)
-      echo "Setting up ACLs for schema-registry..."
-      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf --add --allow-principal "User:ANONYMOUS" --operation Read --topic "_schemas"
-      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf --add --allow-principal "User:ANONYMOUS" --operation Write --topic "_schemas"
-      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf --add --allow-principal "User:ANONYMOUS" --operation Describe --topic "_schemas"
-      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf --add --allow-principal "User:ANONYMOUS" --operation Create --topic "_schemas"
-      # Права на группу потребителей для schema-registry (точное имя группы)
-      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf --add --allow-principal "User:ANONYMOUS" --operation Read --group "schema-registry"
-      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf --add --allow-principal "User:ANONYMOUS" --operation Describe --group "schema-registry"
-      echo "Schema Registry ACLs configured"
-      
-      # AKHQ - права на все топики и группы для администрирования
-      echo "Setting up ACLs for akhq..."
-      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf --add --allow-principal "User:akhq" --operation All --topic "*"
-      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf --add --allow-principal "User:akhq" --operation All --group "*"
-      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf --add --allow-principal "User:akhq" --operation Describe --cluster "kafka-cluster"
-      echo "AKHQ ACLs configured"
-      
-      # Создаем топик test
+
+      # Настройка ACL с использованием SASL (admin)
+      echo "Setting up ACLs..."
+
+      # Admin – super.user, но для явности можно оставить (ACL игнорируются)
+      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf \
+        --add --allow-principal "User:admin" --operation All --topic "*"
+      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf \
+        --add --allow-principal "User:admin" --operation All --group "*"
+      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf \
+        --add --allow-principal "User:admin" --operation All --cluster "kafka-cluster"
+
+      # Producer
+      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf \
+        --add --allow-principal "User:producer" --operation Write --topic "test"
+      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf \
+        --add --allow-principal "User:producer" --operation Describe --topic "test"
+      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf \
+        --add --allow-principal "User:producer" --operation Create --topic "test"
+
+      # Consumer
+      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf \
+        --add --allow-principal "User:consumer" --operation Read --topic "test"
+      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf \
+        --add --allow-principal "User:consumer" --operation Describe --topic "test"
+      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf \
+        --add --allow-principal "User:consumer" --operation Read --group "group-*"
+      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf \
+        --add --allow-principal "User:consumer" --operation Describe --group "group-*"
+
+      # Schema Registry (пользователь schema, не ANONYMOUS)
+      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf \
+        --add --allow-principal "User:schema" --operation Read --topic "_schemas"
+      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf \
+        --add --allow-principal "User:schema" --operation Write --topic "_schemas"
+      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf \
+        --add --allow-principal "User:schema" --operation Describe --topic "_schemas"
+      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf \
+        --add --allow-principal "User:schema" --operation Create --topic "_schemas"
+      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf \
+        --add --allow-principal "User:schema" --operation Read --group "schema-registry"
+      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf \
+        --add --allow-principal "User:schema" --operation Describe --group "schema-registry"
+
+      # AKHQ
+      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf \
+        --add --allow-principal "User:akhq" --operation All --topic "*"
+      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf \
+        --add --allow-principal "User:akhq" --operation All --group "*"
+      /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf \
+        --add --allow-principal "User:akhq" --operation Describe --cluster "kafka-cluster"
+
+      # Interbroker добавлен в super.users, поэтому ACL не обязателен
+
+      # Создание тестового топика
       echo "Creating test topic..."
-      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf --create --topic test --partitions 3 --replication-factor 3
-      echo "Test topic created"
-      
+      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf \
+        --create --topic test --partitions 3 --replication-factor 3 --if-not-exists
       echo "ACL setup completed successfully"
       '
     depends_on:
@@ -142,7 +134,7 @@ services:
       - "9092:9092"
       - "29092:29092"
       - "9093:9093"
-      - "9094:9094"
+      # 9094 больше не публикуем наружу
       - "2181:2181"
       - "2888:2888"
       - "3888:3888"
@@ -168,7 +160,7 @@ services:
       mkdir -p /tmp/zookeeper
       echo "1" > /tmp/zookeeper/myid
 
-      # JAAS для Kafka сервера с SCRAM
+      # JAAS для подключения к ZooKeeper (суперпользователь admin)
       cat > /opt/kafka/config/kafka_server_jaas.conf << "EOF"
       KafkaServer {
         org.apache.kafka.common.security.scram.ScramLoginModule required
@@ -177,31 +169,33 @@ services:
       };
       EOF
 
-      # Kafka конфигурация с SCRAM-SHA-512 и PLAINTEXT для setup
+      # server.properties
       cat > /opt/kafka/config/server.properties << "EOF"
       broker.id=1
       zookeeper.connect=kafka-1:2181,kafka-2:2181,kafka-3:2181
-      
+
       listeners=SASL_SSL://0.0.0.0:9093,SASL_PLAINTEXT://0.0.0.0:29092,PLAINTEXT://0.0.0.0:9094
-      advertised.listeners=SASL_PLAINTEXT://kafka-1:29092,SASL_SSL://kafka-1:9093,PLAINTEXT://kafka-1:9094
+      advertised.listeners=SASL_PLAINTEXT://kafka-1:29092,SASL_SSL://kafka-1:9093
       listener.security.protocol.map=SASL_SSL:SASL_SSL,SASL_PLAINTEXT:SASL_PLAINTEXT,PLAINTEXT:PLAINTEXT
-      inter.broker.listener.name=PLAINTEXT
-      
+      # Межброкерное взаимодействие по SASL_PLAINTEXT
+      inter.broker.listener.name=SASL_PLAINTEXT
+
       sasl.enabled.mechanisms=SCRAM-SHA-512
-      sasl.mechanism.inter.broker.protocol=PLAINTEXT
-      
-      # SCRAM конфигурация
+      sasl.mechanism.inter.broker.protocol=SCRAM-SHA-512
+      listener.name.sasl_plaintext.scram-sha-512.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="interbroker" password="interbroker-secret";
+
+      # SCRAM конфигурация и авторизация
       authorizer.class.name=kafka.security.authorizer.AclAuthorizer
-      allow.everyone.if.no.acl.found=true
-      super.users=User:admin
-      
+      allow.everyone.if.no.acl.found=false
+      super.users=User:admin;User:interbroker
+
       ssl.keystore.location=/opt/kafka/certs/kafka-1.keystore.jks
       ssl.keystore.password=changeit
       ssl.key.password=changeit
       ssl.truststore.location=/opt/kafka/certs/kafka.truststore.jks
       ssl.truststore.password=changeit
       ssl.client.auth=required
-      
+
       offsets.topic.replication.factor=3
       group.initial.rebalance.delay.ms=0
       transaction.state.log.min.isr=2
@@ -213,9 +207,15 @@ services:
       num.partitions=3
       EOF
 
+      # Healthcheck-файл для SASL-доступа
+      cat > /tmp/healthcheck-client.conf << "EOF"
+      security.protocol=SASL_PLAINTEXT
+      sasl.mechanism=SCRAM-SHA-512
+      sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="interbroker" password="interbroker-secret";
+      EOF
+
       echo "Starting Zookeeper..."
       /opt/kafka/bin/zookeeper-server-start.sh /opt/kafka/config/zookeeper.properties &
-
       echo "Waiting for Zookeeper..."
       while ! (echo "ruok" > /dev/tcp/localhost/2181) 2>/dev/null; do sleep 2; done
       sleep 5
@@ -225,7 +225,7 @@ services:
       exec /opt/kafka/bin/kafka-server-start.sh /opt/kafka/config/server.properties
       '
     healthcheck:
-      test: ["CMD-SHELL", "bash -c '(echo ruok > /dev/tcp/localhost/2181) 2>/dev/null && echo OK || exit 1'"]
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:29092 --command-config /tmp/healthcheck-client.conf > /dev/null 2>&1"]
       interval: 10s
       timeout: 5s
       retries: 30
@@ -244,7 +244,6 @@ services:
       - "9095:9092"
       - "29095:29092"
       - "9096:9093"
-      - "9099:9094"
       - "2182:2181"
       - "2889:2888"
       - "3889:3888"
@@ -279,27 +278,27 @@ services:
       cat > /opt/kafka/config/server.properties << "EOF"
       broker.id=2
       zookeeper.connect=kafka-1:2181,kafka-2:2181,kafka-3:2181
-      
+
       listeners=SASL_SSL://0.0.0.0:9093,SASL_PLAINTEXT://0.0.0.0:29092,PLAINTEXT://0.0.0.0:9094
-      advertised.listeners=SASL_PLAINTEXT://kafka-2:29092,SASL_SSL://kafka-2:9093,PLAINTEXT://kafka-2:9094
+      advertised.listeners=SASL_PLAINTEXT://kafka-2:29092,SASL_SSL://kafka-2:9093
       listener.security.protocol.map=SASL_SSL:SASL_SSL,SASL_PLAINTEXT:SASL_PLAINTEXT,PLAINTEXT:PLAINTEXT
-      inter.broker.listener.name=PLAINTEXT
-      
+      inter.broker.listener.name=SASL_PLAINTEXT
+
       sasl.enabled.mechanisms=SCRAM-SHA-512
-      sasl.mechanism.inter.broker.protocol=PLAINTEXT
-      
-      # SCRAM конфигурация
+      sasl.mechanism.inter.broker.protocol=SCRAM-SHA-512
+      listener.name.sasl_plaintext.scram-sha-512.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="interbroker" password="interbroker-secret";
+
       authorizer.class.name=kafka.security.authorizer.AclAuthorizer
-      allow.everyone.if.no.acl.found=true
-      super.users=User:admin
-      
+      allow.everyone.if.no.acl.found=false
+      super.users=User:admin;User:interbroker
+
       ssl.keystore.location=/opt/kafka/certs/kafka-2.keystore.jks
       ssl.keystore.password=changeit
       ssl.key.password=changeit
       ssl.truststore.location=/opt/kafka/certs/kafka.truststore.jks
       ssl.truststore.password=changeit
       ssl.client.auth=required
-      
+
       offsets.topic.replication.factor=3
       group.initial.rebalance.delay.ms=0
       transaction.state.log.min.isr=2
@@ -311,9 +310,14 @@ services:
       num.partitions=3
       EOF
 
+      cat > /tmp/healthcheck-client.conf << "EOF"
+      security.protocol=SASL_PLAINTEXT
+      sasl.mechanism=SCRAM-SHA-512
+      sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="interbroker" password="interbroker-secret";
+      EOF
+
       echo "Starting Zookeeper..."
       /opt/kafka/bin/zookeeper-server-start.sh /opt/kafka/config/zookeeper.properties &
-
       echo "Waiting for Zookeeper..."
       while ! (echo "ruok" > /dev/tcp/localhost/2181) 2>/dev/null; do sleep 2; done
       sleep 5
@@ -323,7 +327,7 @@ services:
       exec /opt/kafka/bin/kafka-server-start.sh /opt/kafka/config/server.properties
       '
     healthcheck:
-      test: ["CMD-SHELL", "bash -c '(echo ruok > /dev/tcp/localhost/2181) 2>/dev/null && echo OK || exit 1'"]
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:29092 --command-config /tmp/healthcheck-client.conf > /dev/null 2>&1"]
       interval: 10s
       timeout: 5s
       retries: 30
@@ -342,7 +346,6 @@ services:
       - "9097:9092"
       - "29097:29092"
       - "9098:9093"
-      - "9100:9094"
       - "2183:2181"
       - "2890:2888"
       - "3890:3888"
@@ -377,27 +380,27 @@ services:
       cat > /opt/kafka/config/server.properties << "EOF"
       broker.id=3
       zookeeper.connect=kafka-1:2181,kafka-2:2181,kafka-3:2181
-      
+
       listeners=SASL_SSL://0.0.0.0:9093,SASL_PLAINTEXT://0.0.0.0:29092,PLAINTEXT://0.0.0.0:9094
-      advertised.listeners=SASL_PLAINTEXT://kafka-3:29092,SASL_SSL://kafka-3:9093,PLAINTEXT://kafka-3:9094
+      advertised.listeners=SASL_PLAINTEXT://kafka-3:29092,SASL_SSL://kafka-3:9093
       listener.security.protocol.map=SASL_SSL:SASL_SSL,SASL_PLAINTEXT:SASL_PLAINTEXT,PLAINTEXT:PLAINTEXT
-      inter.broker.listener.name=PLAINTEXT
-      
+      inter.broker.listener.name=SASL_PLAINTEXT
+
       sasl.enabled.mechanisms=SCRAM-SHA-512
-      sasl.mechanism.inter.broker.protocol=PLAINTEXT
-      
-      # SCRAM конфигурация
+      sasl.mechanism.inter.broker.protocol=SCRAM-SHA-512
+      listener.name.sasl_plaintext.scram-sha-512.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="interbroker" password="interbroker-secret";
+
       authorizer.class.name=kafka.security.authorizer.AclAuthorizer
-      allow.everyone.if.no.acl.found=true
-      super.users=User:admin
-      
+      allow.everyone.if.no.acl.found=false
+      super.users=User:admin;User:interbroker
+
       ssl.keystore.location=/opt/kafka/certs/kafka-3.keystore.jks
       ssl.keystore.password=changeit
       ssl.key.password=changeit
       ssl.truststore.location=/opt/kafka/certs/kafka.truststore.jks
       ssl.truststore.password=changeit
       ssl.client.auth=required
-      
+
       offsets.topic.replication.factor=3
       group.initial.rebalance.delay.ms=0
       transaction.state.log.min.isr=2
@@ -409,9 +412,14 @@ services:
       num.partitions=3
       EOF
 
+      cat > /tmp/healthcheck-client.conf << "EOF"
+      security.protocol=SASL_PLAINTEXT
+      sasl.mechanism=SCRAM-SHA-512
+      sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="interbroker" password="interbroker-secret";
+      EOF
+
       echo "Starting Zookeeper..."
       /opt/kafka/bin/zookeeper-server-start.sh /opt/kafka/config/zookeeper.properties &
-
       echo "Waiting for Zookeeper..."
       while ! (echo "ruok" > /dev/tcp/localhost/2181) 2>/dev/null; do sleep 2; done
       sleep 5
@@ -421,7 +429,7 @@ services:
       exec /opt/kafka/bin/kafka-server-start.sh /opt/kafka/config/server.properties
       '
     healthcheck:
-      test: ["CMD-SHELL", "bash -c '(echo ruok > /dev/tcp/localhost/2181) 2>/dev/null && echo OK || exit 1'"]
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:29092 --command-config /tmp/healthcheck-client.conf > /dev/null 2>&1"]
       interval: 10s
       timeout: 5s
       retries: 30
@@ -448,10 +456,13 @@ services:
       - "8081:8081"
     environment:
       SCHEMA_REGISTRY_HOST_NAME: schema-registry
-      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: 'PLAINTEXT://kafka-1:9094,PLAINTEXT://kafka-2:9094,PLAINTEXT://kafka-3:9094'
-      SCHEMA_REGISTRY_LISTENERS: 'http://0.0.0.0:8081'
-      SCHEMA_REGISTRY_DEBUG: 'true'
-      SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR: '3'
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: "SASL_PLAINTEXT://kafka-1:29092,SASL_PLAINTEXT://kafka-2:29092,SASL_PLAINTEXT://kafka-3:29092"
+      SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL: SASL_PLAINTEXT
+      SCHEMA_REGISTRY_KAFKASTORE_SASL_MECHANISM: SCRAM-SHA-512
+      SCHEMA_REGISTRY_KAFKASTORE_SASL_JAAS_CONFIG: "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"schema\" password=\"schema-secret\";"
+      SCHEMA_REGISTRY_LISTENERS: "http://0.0.0.0:8081"
+      SCHEMA_REGISTRY_DEBUG: "true"
+      SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR: "3"
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8081/subjects || exit 1"]
       interval: 15s
@@ -485,13 +496,13 @@ services:
           connections:
             docker-kafka:
               properties:
-                bootstrap.servers: "kafka-1:9094,kafka-2:9094,kafka-3:9094"
-                request.timeout.ms: 5000
-                default.api.timeout.ms: 10000
+                bootstrap.servers: "kafka-1:29092,kafka-2:29092,kafka-3:29092"
+                security.protocol: SASL_PLAINTEXT
+                sasl.mechanism: SCRAM-SHA-512
+                sasl.jaas.config: "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"akhq\" password=\"akhq-secret\";"
               schema-registry:
                 url: "http://schema-registry:8081"
               timeout: 10000
-          
           groups:
             admin:
               - role: admin
