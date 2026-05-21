@@ -36,11 +36,14 @@ services:
       - "9093:9093"     # SASL_SSL
     environment:
       - BROKER_ID=1
+      - MM2_CONFIG=mm2-primary-to-secondary.properties
+      - CONNECT_REST_ADVERTISED_HOST_NAME=kafka-1
+      - CONNECT_REST_ADVERTISED_PORT=8083
     volumes:
       - ./certs:/opt/kafka/certs:ro
       - ./configs/kafka-1:/opt/kafka/config/custom:ro
       - ./scripts:/opt/kafka/scripts:ro
-      - ./mm2.properties:/opt/kafka/config/mm2.properties:ro
+      - ./configs/mm2:/opt/kafka/config/mm2:ro
     command: bash /opt/kafka/scripts/start-kafka.sh
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:29092 --command-config /tmp/healthcheck-client.conf > /dev/null 2>&1"]
@@ -63,11 +66,14 @@ services:
       - "9096:9093"
     environment:
       - BROKER_ID=2
+      - MM2_CONFIG=mm2-primary-to-secondary.properties
+      - CONNECT_REST_ADVERTISED_HOST_NAME=kafka-2
+      - CONNECT_REST_ADVERTISED_PORT=8083
     volumes:
       - ./certs:/opt/kafka/certs:ro
       - ./configs/kafka-2:/opt/kafka/config/custom:ro
       - ./scripts:/opt/kafka/scripts:ro
-      - ./mm2.properties:/opt/kafka/config/mm2.properties:ro
+      - ./configs/mm2:/opt/kafka/config/mm2:ro
     command: bash /opt/kafka/scripts/start-kafka.sh
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:29092 --command-config /tmp/healthcheck-client.conf > /dev/null 2>&1"]
@@ -90,11 +96,14 @@ services:
       - "9098:9093"
     environment:
       - BROKER_ID=3
+      - MM2_CONFIG=mm2-primary-to-secondary.properties
+      - CONNECT_REST_ADVERTISED_HOST_NAME=kafka-3
+      - CONNECT_REST_ADVERTISED_PORT=8083
     volumes:
       - ./certs:/opt/kafka/certs:ro
       - ./configs/kafka-3:/opt/kafka/config/custom:ro
       - ./scripts:/opt/kafka/scripts:ro
-      - ./mm2.properties:/opt/kafka/config/mm2.properties:ro
+      - ./configs/mm2:/opt/kafka/config/mm2:ro
     command: bash /opt/kafka/scripts/start-kafka.sh
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:29092 --command-config /tmp/healthcheck-client.conf > /dev/null 2>&1"]
@@ -134,11 +143,14 @@ services:
       - "9094:9093"     # SASL_SSL
     environment:
       - BROKER_ID=4
+      - MM2_CONFIG=mm2-secondary-to-primary.properties
+      - CONNECT_REST_ADVERTISED_HOST_NAME=kafka-4
+      - CONNECT_REST_ADVERTISED_PORT=8083
     volumes:
       - ./certs:/opt/kafka/certs:ro
       - ./configs/kafka-4:/opt/kafka/config/custom:ro
       - ./scripts:/opt/kafka/scripts:ro
-      - ./mm2.properties:/opt/kafka/config/mm2.properties:ro
+      - ./configs/mm2:/opt/kafka/config/mm2:ro
     command: bash /opt/kafka/scripts/start-kafka.sh
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:29092 --command-config /tmp/healthcheck-client.conf > /dev/null 2>&1"]
@@ -161,11 +173,14 @@ services:
       - "9095:9093"
     environment:
       - BROKER_ID=5
+      - MM2_CONFIG=mm2-secondary-to-primary.properties
+      - CONNECT_REST_ADVERTISED_HOST_NAME=kafka-5
+      - CONNECT_REST_ADVERTISED_PORT=8083
     volumes:
       - ./certs:/opt/kafka/certs:ro
       - ./configs/kafka-5:/opt/kafka/config/custom:ro
       - ./scripts:/opt/kafka/scripts:ro
-      - ./mm2.properties:/opt/kafka/config/mm2.properties:ro
+      - ./configs/mm2:/opt/kafka/config/mm2:ro
     command: bash /opt/kafka/scripts/start-kafka.sh
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:29092 --command-config /tmp/healthcheck-client.conf > /dev/null 2>&1"]
@@ -188,11 +203,14 @@ services:
       - "9097:9093"
     environment:
       - BROKER_ID=6
+      - MM2_CONFIG=mm2-secondary-to-primary.properties
+      - CONNECT_REST_ADVERTISED_HOST_NAME=kafka-6
+      - CONNECT_REST_ADVERTISED_PORT=8083
     volumes:
       - ./certs:/opt/kafka/certs:ro
       - ./configs/kafka-6:/opt/kafka/config/custom:ro
       - ./scripts:/opt/kafka/scripts:ro
-      - ./mm2.properties:/opt/kafka/config/mm2.properties:ro
+      - ./configs/mm2:/opt/kafka/config/mm2:ro
     command: bash /opt/kafka/scripts/start-kafka.sh
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:29092 --command-config /tmp/healthcheck-client.conf > /dev/null 2>&1"]
@@ -251,9 +269,17 @@ services:
         condition: service_healthy
       kafka-3:
         condition: service_healthy
+      kafka-4:
+        condition: service_healthy
+      kafka-5:
+        condition: service_healthy
+      kafka-6:
+        condition: service_healthy
       schema-registry:
         condition: service_healthy
       acl-setup-primary:
+        condition: service_completed_successfully
+      acl-setup-secondary:
         condition: service_completed_successfully
     ports:
       - "8080:8080"
@@ -272,15 +298,24 @@ services:
               schema-registry:
                 url: "http://schema-registry:8081"
               timeout: 10000
+            docker-kafka-secondary:
+              properties:
+                bootstrap.servers: "kafka-4:29092,kafka-5:29092,kafka-6:29092"
+                security.protocol: SASL_PLAINTEXT
+                sasl.mechanism: SCRAM-SHA-512
+                sasl.jaas.config: "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"akhq\" password=\"akhq-secret\";"
+              timeout: 10000
           groups:
             admin:
               - role: admin
                 clusters:
                   - docker-kafka
+                  - docker-kafka-secondary
             reader:
               - role: reader
                 clusters:
                   - docker-kafka
+                  - docker-kafka-secondary
     networks:
       - kafka-network
 

@@ -34,10 +34,8 @@ echo "Starting Kafka..."
 export KAFKA_OPTS="-Djava.security.auth.login.config=/opt/kafka/config/kafka_server_jaas.conf"
 /opt/kafka/bin/kafka-server-start.sh /opt/kafka/config/server.properties &
 
-# Запускаем MirrorMaker 2 во всех контейнерах
-echo "Starting MirrorMaker 2 inside this container..."
+echo "Starting MirrorMaker 2 with config: $MM2_CONFIG"
 export KAFKA_OPTS=""
-/opt/kafka/bin/connect-standalone.sh /opt/kafka/config/mm2.properties &
+/opt/kafka/bin/connect-mirror-maker.sh "/opt/kafka/config/mm2/$MM2_CONFIG" &
 
-# Удерживаем контейнер живым
 tail -f /dev/null

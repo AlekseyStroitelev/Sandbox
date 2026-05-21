@@ -48,7 +48,7 @@ echo "Setting up ACLs..."
 /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf \
   --add --allow-principal "User:akhq" --operation Describe --cluster "kafka-cluster"
 
-# MirrorMaker 2 — права на топики и группы
+# MirrorMaker 2 – права на топики и группы
 /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf \
   --add --allow-principal "User:mm2" --operation Read --topic "*"
 /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf \
@@ -61,6 +61,16 @@ echo "Setting up ACLs..."
   --add --allow-principal "User:mm2" --operation Read --group "*"
 /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf \
   --add --allow-principal "User:mm2" --operation Describe --group "*"
+
+# MirrorMaker 2 – права на внутренние топики Connect с префиксом primary.connect
+/opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf \
+  --add --allow-principal "User:mm2" --operation Create --topic "primary.connect" --resource-pattern-type prefixed
+/opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf \
+  --add --allow-principal "User:mm2" --operation Write --topic "primary.connect" --resource-pattern-type prefixed
+/opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf \
+  --add --allow-principal "User:mm2" --operation Read --topic "primary.connect" --resource-pattern-type prefixed
+/opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf \
+  --add --allow-principal "User:mm2" --operation Describe --topic "primary.connect" --resource-pattern-type prefixed
 
 echo "Creating test topic..."
 /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:29092 --command-config /tmp/client-sasl.conf \
