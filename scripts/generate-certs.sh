@@ -10,7 +10,7 @@ fi
 # CA
 openssl req -x509 -newkey rsa:4096 -keyout /tmp/certs/ca-key -out /tmp/certs/ca-cert -days 365 -nodes -subj "/CN=Kafka-CA"
 
-for broker in kafka-1 kafka-2 kafka-3; do
+for broker in kafka-1 kafka-2 kafka-3 kafka-4 kafka-5 kafka-6; do
   keytool -keystore /tmp/certs/${broker}.keystore.jks -alias localhost -validity 365 -genkey -keyalg RSA \
     -dname "CN=${broker}" -ext "SAN=DNS:${broker},DNS:localhost" -storepass changeit -keypass changeit
   keytool -keystore /tmp/certs/${broker}.keystore.jks -alias localhost -validity 365 -certreq -keyalg RSA \

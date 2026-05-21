@@ -21,7 +21,7 @@ done
 echo "ZooKeeper quorum established!"
 
 echo "Creating SCRAM users in ZooKeeper..."
-for user in admin:admin-secret producer:producer-secret consumer:consumer-secret schema:schema-secret akhq:akhq-secret interbroker:interbroker-secret; do
+for user in admin:admin-secret producer:producer-secret consumer:consumer-secret schema:schema-secret akhq:akhq-secret interbroker:interbroker-secret mm2:mm2-secret; do
   u="${user%%:*}"
   p="${user##*:}"
   /opt/kafka/bin/kafka-configs.sh --zookeeper localhost:2181 --alter \
@@ -32,4 +32,12 @@ sleep 5
 
 echo "Starting Kafka..."
 export KAFKA_OPTS="-Djava.security.auth.login.config=/opt/kafka/config/kafka_server_jaas.conf"
-exec /opt/kafka/bin/kafka-server-start.sh /opt/kafka/config/server.properties
+/opt/kafka/bin/kafka-server-start.sh /opt/kafka/config/server.properties &
+
+# Запускаем MirrorMaker 2 во всех контейнерах
+echo "Starting MirrorMaker 2 inside this container..."
+export KAFKA_OPTS=""
+/opt/kafka/bin/connect-standalone.sh /opt/kafka/config/mm2.properties &
+
+# Удерживаем контейнер живым
+tail -f /dev/null
